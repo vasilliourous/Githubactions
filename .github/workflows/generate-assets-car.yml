@@ -62,7 +62,12 @@ jobs:
       - name: Build AppIcon.appiconset
         run: |
           set -euo pipefail
-          SET="$RUNNER_TEMP/AppIcon.appiconset"
+          # actool wants an .xcassets BUNDLE containing the .appiconset, not the
+          # .appiconset passed directly. Passing it directly exits 0 and emits
+          # no Assets.car at all -- which is what the first run of this workflow
+          # did, caught by the `test -s` guard below.
+          CATALOG="$RUNNER_TEMP/AppIcon.xcassets"
+          SET="$CATALOG/AppIcon.appiconset"
           mkdir -p "$SET"
           # sips is the Xcode-blessed resizer; it preserves the colour profile
           # and premultiplied alpha, which a naive PNG resize can drop.
@@ -70,18 +75,23 @@ jobs:
             sips -z "$px" "$px" icon/master.png --out "$SET/icon_$px.png" >/dev/null
           done
           cp icon/Contents.json "$SET/Contents.json"
-          ls -la "$SET"
+          printf '%s\n' '{"info":{"author":"xcode","version":1}}' \
+            > "$CATALOG/Contents.json"
+          find "$CATALOG" -type f | sort
 
       - name: Compile the asset catalog
         run: |
           set -euo pipefail
           OUT="$RUNNER_TEMP/out"
           mkdir -p "$OUT"
-          xcrun actool "$RUNNER_TEMP/AppIcon.appiconset" \
+          xcrun actool "$RUNNER_TEMP/AppIcon.xcassets" \
             --compile "$OUT" \
             --platform macosx \
             --minimum-deployment-target 11.0 \
             --app-icon AppIcon \
+            --output-format human-readable-text \
+            --notices \
+            --warnings \
             --output-partial-info-plist "$OUT/partial.plist"
           # actool can exit 0 on malformed input and emit nothing.
           test -s "$OUT/Assets.car" || { echo "::error::actool produced no Assets.car"; exit 1; }

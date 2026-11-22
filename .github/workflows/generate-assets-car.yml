@@ -1,0 +1,94 @@
+# Generate Assets.car for Locus's FlClash-derived app icon.
+#
+# WHY THIS REPO EXISTS
+#   Assets.car is Apple's compiled asset catalog. It cannot be built on Linux:
+#   actool ships with Xcode, and there is no free reimplementation. Locus builds
+#   on Ubuntu for Linux and Windows, so the catalog has to be produced on a
+#   macOS runner and carried over as an artifact.
+#
+# WHY NOT `tauri icon`
+#   `tauri icon` emits .icns and .ico but does not emit Assets.car. Tauri lists
+#   Assets.car in bundle.icon; macOS prefers it over icon.icns when both exist.
+#   Leaving a stale catalog beside an updated .icns is how you ship a macOS app
+#   whose Dock icon does not match its installer.
+#
+# INPUTS
+#   icon/master.png     1024x1024 RGBA, the mark with its margins already set.
+#                       Not resized for framing here, so the caller's framing
+#                       survives.
+#   icon/Contents.json  the AppIcon.appiconset manifest actool reads.
+#
+# OUTPUT
+#   The `Assets.car` artifact. Download it and drop it into
+#   Locus/client/src-tauri/icons/, replacing the Clash Verge Rev catalog.
+name: Generate Assets.car
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  assets-car:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the master icon
+        run: |
+          set -euo pipefail
+          test -f icon/master.png || { echo "::error::missing icon/master.png"; exit 1; }
+          file icon/master.png
+          # actool produces a broken catalog from a non-1024 source without
+          # failing, so assert the size rather than trusting the file name.
+          python3 - <<'PY'
+          import struct
+          import sys
+
+          with open("icon/master.png", "rb") as fh:
+              head = fh.read(33)
+          if head[:8] != b"\x89PNG\r\n\x1a\n":
+              sys.exit("master.png is not a PNG")
+          width, height = struct.unpack(">II", head[16:24])
+          print(f"master: {width}x{height}")
+          if (width, height) != (1024, 1024):
+              sys.exit(f"master must be 1024x1024, got {width}x{height}")
+          PY
+
+      # actool reads a Contents.json manifest; the PNGs alone are not enough.
+      # Every size the manifest names is derived from the one master so the
+      # files cannot drift from the manifest.
+      - name: Build AppIcon.appiconset
+        run: |
+          set -euo pipefail
+          SET="$RUNNER_TEMP/AppIcon.appiconset"
+          mkdir -p "$SET"
+          # sips is the Xcode-blessed resizer; it preserves the colour profile
+          # and premultiplied alpha, which a naive PNG resize can drop.
+          for px in 16 32 64 128 256 512; do
+            sips -z "$px" "$px" icon/master.png --out "$SET/icon_$px.png" >/dev/null
+          done
+          cp icon/Contents.json "$SET/Contents.json"
+          ls -la "$SET"
+
+      - name: Compile the asset catalog
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/out"
+          mkdir -p "$OUT"
+          xcrun actool "$RUNNER_TEMP/AppIcon.appiconset" \
+            --compile "$OUT" \
+            --platform macosx \
+            --minimum-deployment-target 11.0 \
+            --app-icon AppIcon \
+            --output-partial-info-plist "$OUT/partial.plist"
+          # actool can exit 0 on malformed input and emit nothing.
+          test -s "$OUT/Assets.car" || { echo "::error::actool produced no Assets.car"; exit 1; }
+          ls -la "$OUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Assets.car
+          path: ${{ runner.temp }}/out/Assets.car
+          if-no-files-found: error
